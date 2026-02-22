@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MF仕訳帳コンバーター</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        /* ステップインジケーター */
+        .converter-steps {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 24px;
+        }
+        .step-item {
+            flex: 1;
+            text-align: center;
+            padding: 12px 8px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-muted);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .step-item.active {
+            background: var(--accent);
+            color: white;
+            border-color: var(--accent);
+        }
+        .step-item.completed {
+            background: var(--bg-hover);
+            color: var(--success);
+            border-color: var(--success);
+        }
+        .step-number {
+            display: block;
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 2px;
+        }
+
+        /* コンバーターステップ共通 */
+        .converter-step { display: none; }
+        .converter-step.active { display: block; }
+
+        /* ステップナビ */
+        .step-nav {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 24px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+        }
+
+        /* 入力タブ */
+        .input-tabs {
+            display: flex;
+            gap: 0;
+            margin-bottom: 16px;
+        }
+        .input-tab {
+            flex: 1;
+            padding: 10px;
+            text-align: center;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 14px;
+            font-family: var(--font);
+            transition: all 0.2s;
+        }
+        .input-tab:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+        .input-tab:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+        .input-tab.active {
+            background: var(--bg-card);
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+        .input-panel { display: none; }
+        .input-panel.active { display: block; }
+
+        /* ドロップゾーン */
+        .drop-zone {
+            border: 2px dashed var(--border);
+            border-radius: var(--radius-lg);
+            padding: 40px 20px;
+            text-align: center;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        .drop-zone:hover,
+        .drop-zone.dragover {
+            border-color: var(--accent);
+            background: rgba(108, 99, 255, 0.05);
+        }
+        .drop-zone-icon { font-size: 36px; margin-bottom: 8px; }
+        .drop-zone-text { color: var(--text-muted); font-size: 14px; }
+        .drop-zone-text strong { color: var(--accent); }
+
+        /* オプション行 */
+        .option-row {
+            display: flex;
+            gap: 16px;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+        .option-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+        .option-item select,
+        .option-item input[type="checkbox"] {
+            accent-color: var(--accent);
+        }
+        .option-item select {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            padding: 4px 8px;
+            font-size: 13px;
+            font-family: var(--font);
+        }
+
+        /* テキスト貼り付けエリア */
+        .paste-area {
+            width: 100%;
+            min-height: 200px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            font-family: monospace;
+            font-size: 13px;
+            padding: 12px;
+            resize: vertical;
+        }
+        .paste-area:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        /* プレビューテーブル（横スクロール） */
+        .preview-container {
+            overflow-x: auto;
+            margin: 16px 0;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+        }
+        .preview-container .table {
+            min-width: 600px;
+            margin: 0;
+        }
+        .preview-container .table th {
+            background: var(--bg-card);
+            position: sticky;
+            top: 0;
+            white-space: nowrap;
+        }
+        .preview-container .table td {
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .preview-info {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 8px;
+        }
+
+        /* プリセットグリッド */
+        .preset-grid {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .preset-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            padding: 12px 20px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            color: var(--text-primary);
+            font-size: 14px;
+            font-weight: bold;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: all 0.15s;
+            min-width: 120px;
+        }
+        .preset-btn:hover {
+            border-color: var(--accent);
+            background: rgba(108, 99, 255, 0.1);
+        }
+        .preset-desc {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-weight: normal;
+        }
+
+        /* マッピング状況 */
+        .mapping-status {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 0;
+            margin-bottom: 8px;
+            font-size: 13px;
+        }
+        .mapping-count { color: var(--text-muted); }
+        .mapping-warn { color: var(--warning); }
+        .mapping-ok { color: var(--success); }
+
+        /* マッピングテーブル */
+        .mapping-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .mapping-table th {
+            text-align: left;
+            padding: 8px 10px;
+            color: var(--text-muted);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+        }
+        .mapping-table-row {
+            border-bottom: 1px solid var(--border);
+            transition: background 0.1s;
+        }
+        .mapping-table-row:hover {
+            background: var(--bg-hover);
+        }
+        .mapping-table-row.mapped {
+            background: rgba(108, 99, 255, 0.04);
+        }
+        .mt-col-source { width: 25%; }
+        .mt-col-samples { width: 35%; }
+        .mt-col-arrow { width: 30px; text-align: center; }
+        .mt-col-target { width: 35%; }
+        .mt-source {
+            padding: 10px;
+            font-weight: bold;
+            color: var(--text-primary);
+        }
+        .mt-samples {
+            padding: 10px;
+            color: var(--text-muted);
+            font-size: 12px;
+            max-width: 250px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .mt-arrow {
+            padding: 10px 4px;
+            color: var(--accent);
+            font-weight: bold;
+            text-align: center;
+        }
+        .mt-target {
+            padding: 8px 10px;
+        }
+        .mapping-select {
+            width: 100%;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-muted);
+            padding: 6px 10px;
+            font-size: 13px;
+            font-family: var(--font);
+            cursor: pointer;
+        }
+        .mapping-select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .mapping-select.selected {
+            color: var(--text-primary);
+            border-color: var(--accent);
+            background: rgba(108, 99, 255, 0.08);
+        }
+
+        /* ルールセクション */
+        .rule-section {
+            margin-bottom: 20px;
+        }
+        .rule-section-title {
+            font-size: 14px;
+            color: var(--accent-blue);
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+            font-weight: bold;
+        }
+        .account-mapping-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .account-mapping-row input {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            padding: 6px 10px;
+            font-size: 13px;
+            font-family: var(--font);
+            flex: 1;
+        }
+        .account-mapping-row input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .fixed-value-row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .fixed-value-row label {
+            min-width: 140px;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+        .fixed-value-row input,
+        .fixed-value-row select {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            padding: 6px 10px;
+            font-size: 13px;
+            font-family: var(--font);
+            flex: 1;
+        }
+
+        /* エラーサマリー */
+        .error-summary {
+            background: rgba(248, 81, 73, 0.1);
+            border: 1px solid var(--danger);
+            border-radius: var(--radius-md);
+            padding: 12px 16px;
+            margin-bottom: 16px;
+        }
+        .error-summary-title {
+            color: var(--danger);
+            font-weight: bold;
+            margin-bottom: 6px;
+            font-size: 14px;
+        }
+        .error-summary-list {
+            font-size: 13px;
+            color: var(--text-muted);
+            max-height: 120px;
+            overflow-y: auto;
+        }
+        .error-summary-list div { margin-bottom: 2px; }
+
+        .success-summary {
+            background: rgba(63, 185, 80, 0.1);
+            border: 1px solid var(--success);
+            border-radius: var(--radius-md);
+            padding: 12px 16px;
+            margin-bottom: 16px;
+        }
+        .success-summary-title {
+            color: var(--success);
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        /* 統計バー */
+        .stats-bar {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+        .stat-item {
+            flex: 1;
+            min-width: 120px;
+            padding: 10px 14px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            text-align: center;
+        }
+        .stat-label {
+            display: block;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 2px;
+        }
+        .stat-value {
+            display: block;
+            font-size: 15px;
+            font-weight: bold;
+            color: var(--text-primary);
+        }
+        .stat-ok { border-color: var(--success); }
+        .stat-ok .stat-value { color: var(--success); }
+        .stat-warn { border-color: var(--warning); }
+        .stat-warn .stat-value { color: var(--warning); }
+
+        /* エラー行ハイライト */
+        .error-row td { background: rgba(248, 81, 73, 0.08) !important; }
+
+        /* 編集可能セル */
+        .editable-cell {
+            cursor: pointer;
+            position: relative;
+            transition: background 0.15s;
+        }
+        .editable-cell:hover {
+            background: var(--bg-card) !important;
+            outline: 1px solid var(--accent);
+            outline-offset: -1px;
+        }
+        .editable-cell.editing {
+            padding: 0 !important;
+        }
+        .editable-cell .cell-input {
+            width: 100%;
+            background: var(--bg-input);
+            border: 2px solid var(--accent);
+            border-radius: 2px;
+            color: var(--text-primary);
+            padding: 8px 10px;
+            font-size: 14px;
+            font-family: var(--font);
+            outline: none;
+        }
+        /* 訂正済みセル */
+        .cell-corrected {
+            background: rgba(108, 99, 255, 0.1) !important;
+            border-left: 3px solid var(--accent) !important;
+        }
+
+        /* ルール保存ポップアップ */
+        .rule-popup {
+            position: fixed;
+            bottom: 80px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--bg-card);
+            border: 1px solid var(--accent);
+            border-radius: var(--radius-lg);
+            padding: 16px 20px;
+            z-index: 250;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            min-width: 340px;
+            display: none;
+        }
+        .rule-popup.show { display: block; }
+        .rule-popup-title {
+            font-size: 14px;
+            font-weight: bold;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+        .rule-popup-detail {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+            line-height: 1.6;
+        }
+        .rule-popup-detail strong {
+            color: var(--accent);
+        }
+        .rule-popup-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        /* 訂正ルール一覧 */
+        .correction-rules-card { margin-top: 0; }
+        .correction-rule-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+        }
+        .correction-rule-item:last-child { border-bottom: none; }
+        .correction-rule-field {
+            background: var(--bg-hover);
+            color: var(--text-muted);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+        .correction-rule-from {
+            color: var(--danger);
+            text-decoration: line-through;
+        }
+        .correction-rule-to {
+            color: var(--success);
+            font-weight: bold;
+        }
+
+        /* テンプレートリスト */
+        .template-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .template-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .template-item:hover { background: var(--bg-hover); }
+        .template-item-name {
+            font-size: 14px;
+            color: var(--text-primary);
+        }
+        .template-item-date {
+            font-size: 12px;
+            color: var(--text-muted);
+        }
+
+        /* ファイル名表示 */
+        .file-info {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            background: var(--bg-card);
+            border-radius: var(--radius-sm);
+            margin-top: 12px;
+            font-size: 13px;
+        }
+        .file-info-name { color: var(--accent); font-weight: bold; }
+        .file-info-size { color: var(--text-muted); }
+        .file-info-encoding {
+            font-size: 11px;
+            color: var(--success);
+            background: rgba(63, 185, 80, 0.1);
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        /* Excel警告 */
+        .excel-warning {
+            padding: 16px;
+            background: rgba(210, 153, 34, 0.1);
+            border: 1px solid var(--warning);
+            border-radius: var(--radius-md);
+            margin-top: 12px;
+        }
+        .excel-warning-title {
+            font-size: 15px;
+            font-weight: bold;
+            color: var(--warning);
+            margin-bottom: 8px;
+        }
+        .excel-warning-file {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+        .excel-warning-guide {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.8;
+        }
+        .excel-warning-guide ol {
+            margin: 8px 0 0 20px;
+            padding: 0;
+        }
+        .excel-warning-guide li {
+            margin-bottom: 8px;
+        }
+        .excel-warning-guide strong {
+            color: var(--text-primary);
+        }
+
+        /* エクスポートボタン群 */
+        .export-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        /* 会社選択バー */
+        .company-bar {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 20px;
+            padding: 12px 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+        }
+        .company-bar-label {
+            font-size: 13px;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+        .company-bar select {
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-secondary);
+            padding: 6px 10px;
+            font-size: 14px;
+            font-family: var(--font);
+            min-width: 160px;
+        }
+        .company-bar select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .company-rule-count {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-left: auto;
+        }
+        .company-bar-separator {
+            color: var(--border);
+            font-size: 14px;
+        }
+        .api-key-panel {
+            padding: 10px 16px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            margin-bottom: 20px;
+            margin-top: -12px;
+        }
+        .api-key-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .api-key-input {
+            flex: 1;
+            max-width: 320px;
+            font-size: 13px;
+            padding: 5px 10px;
+        }
+        .api-key-status {
+            font-size: 12px;
+            white-space: nowrap;
+        }
+
+        /* ページ全体ドラッグオーバー */
+        body.page-dragover::after {
+            content: 'ファイルをドロップしてデータを読み込む';
+            position: fixed;
+            inset: 0;
+            background: rgba(108, 99, 255, 0.15);
+            border: 3px dashed var(--accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            font-weight: bold;
+            color: var(--accent);
+            z-index: 999;
+            pointer-events: none;
+        }
+
+        /* ショートカットヒント */
+        .shortcut-hints {
+            display: flex;
+            gap: 16px;
+            padding: 8px 0;
+            font-size: 11px;
+            color: var(--text-muted);
+            flex-wrap: wrap;
+        }
+        .shortcut-hint kbd {
+            display: inline-block;
+            padding: 1px 6px;
+            background: var(--bg-hover);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            font-size: 11px;
+            font-family: monospace;
+            color: var(--text-secondary);
+        }
+
+        /* エラーフィルターボタン */
+        .filter-bar {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .filter-btn {
+            padding: 4px 12px;
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            color: var(--text-muted);
+            font-size: 12px;
+            font-family: var(--font);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .filter-btn.active {
+            background: rgba(108, 99, 255, 0.15);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .filter-btn:hover {
+            border-color: var(--accent);
+        }
+
+        /* 仕訳パターンカード */
+        .journal-patterns-card {
+            margin-top: 0;
+        }
+        .pattern-count-badge {
+            background: var(--accent);
+            color: #fff;
+            font-size: 11px;
+            padding: 1px 8px;
+            border-radius: 10px;
+            margin-left: 6px;
+        }
+        .pattern-info {
+            padding: 8px 16px;
+            font-size: 12px;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+        }
+        .journal-pattern-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border);
+            font-size: 13px;
+            transition: background 0.1s;
+        }
+        .journal-pattern-item:hover {
+            background: var(--bg-hover);
+        }
+        .pattern-keyword {
+            background: rgba(108, 99, 255, 0.12);
+            color: var(--accent);
+            padding: 2px 10px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        .pattern-account {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+        .pattern-account-label {
+            color: var(--text-muted);
+            font-size: 11px;
+            margin-right: 2px;
+        }
+        .pattern-count {
+            color: var(--text-muted);
+            font-size: 11px;
+            margin-left: auto;
+            white-space: nowrap;
+        }
+        .pattern-delete {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 2px 6px;
+            font-size: 14px;
+            border-radius: 3px;
+            transition: all 0.15s;
+        }
+        .pattern-delete:hover {
+            background: rgba(248, 81, 73, 0.1);
+            color: var(--danger);
+        }
+
+        /* プレビューでパターン適用行のハイライト */
+        .row-pattern-applied {
+            border-left: 3px solid var(--accent) !important;
+            background: rgba(108, 99, 255, 0.04);
+        }
+
+        /* OCRプログレスバー */
+        .ocr-progress-bar-container {
+            width: 100%;
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .ocr-progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #6c63ff, #3fb950);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        /* 領収書OCR行のハイライト */
+        .row-receipt {
+            border-left: 3px solid #d29922 !important;
+            background: rgba(210, 153, 34, 0.04);
+        }
+
+        /* デフォルト科目適用行のハイライト */
+        .row-default-account {
+            border-left: 3px solid #3fb950 !important;
+            background: rgba(63, 185, 80, 0.04);
+        }
+
+        /* Gemini科目推測行のハイライト */
+        .row-gemini-account {
+            border-left: 3px solid #d2a8ff !important;
+            background: rgba(210, 168, 255, 0.04);
+        }
+    </style>
+</head>
+<body>
+    <div class="main-content">
+        <h1 style="color: var(--text-primary); font-size: 22px; margin-bottom: 4px;">MF仕訳帳コンバーター</h1>
+        <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 20px;">CSV・テキストデータをマネーフォワード仕訳帳形式に変換</p>
+
+        <!-- 会社選択バー -->
+        <div class="company-bar">
+            <span class="company-bar-label">会社:</span>
+            <select id="companySelect" onchange="onCompanyChange()">
+                <option value="">（会社を選択）</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" onclick="openAddCompanyPrompt()">+ 新規</button>
+            <button class="btn-icon" onclick="openDeleteCompanyPrompt()" title="会社を削除" id="deleteCompanyBtn" style="display: none;">🗑</button>
+            <span class="company-bar-separator">│</span>
+            <span class="company-bar-label">業種:</span>
+            <select id="industrySelect" onchange="onIndustryChange()">
+                <option value="">（未設定）</option>
+            </select>
+            <span class="company-bar-separator">│</span>
+            <span class="company-bar-label">貸方:</span>
+            <select id="defaultKashiSelect" onchange="onDefaultKashiChange()">
+                <option value="">（自動）</option>
+                <option value="現金">現金</option>
+                <option value="未払金">未払金</option>
+                <option value="買掛金">買掛金</option>
+                <option value="普通預金">普通預金</option>
+            </select>
+            <span class="company-rule-count" id="companyRuleCount"></span>
+            <button class="btn-icon" onclick="toggleApiKeyPanel()" title="API設定" id="apiSettingsBtn">⚙</button>
+        </div>
+
+        <!-- APIキー設定パネル -->
+        <div class="api-key-panel" id="apiKeyPanel" style="display: none;">
+            <div class="api-key-row">
+                <span class="company-bar-label">Gemini APIキー:</span>
+                <input type="password" id="geminiApiKeyInput" class="form-input api-key-input" placeholder="AIza...">
+                <button class="btn btn-secondary btn-sm" onclick="saveGeminiApiKey()">保存</button>
+                <button class="btn-icon" onclick="toggleApiKeyVisibility()" title="表示切替">👁</button>
+                <span class="api-key-status" id="apiKeyStatus"></span>
+            </div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+                <a href="https://aistudio.google.com/apikey" target="_blank" style="color: var(--accent);">Google AI Studio</a> でAPIキーを取得できます（無料枠あり）
+            </div>
+        </div>
+
+        <!-- ステップインジケーター -->
+        <div class="converter-steps" id="stepIndicator">
+            <div class="step-item active" onclick="goToStep(1)">
+                <span class="step-number">1</span>データ入力
+            </div>
+            <div class="step-item" onclick="goToStep(2)">
+                <span class="step-number">2</span>カラムマッピング
+            </div>
+            <div class="step-item" onclick="goToStep(3)">
+                <span class="step-number">3</span>変換ルール
+            </div>
+            <div class="step-item" onclick="goToStep(4)">
+                <span class="step-number">4</span>プレビュー・出力
+            </div>
+        </div>
+
+        <!-- ===== ステップ1: データ入力 ===== -->
+        <div id="step1" class="converter-step active">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">データ入力</span>
+                    <button class="btn btn-secondary btn-sm" onclick="openTemplateLoadModal()">テンプレート読込</button>
+                </div>
+
+                <!-- 入力方法タブ -->
+                <div class="input-tabs">
+                    <button class="input-tab active" onclick="switchInputTab('file')">CSVファイル</button>
+                    <button class="input-tab" onclick="switchInputTab('paste')">テキスト貼り付け</button>
+                </div>
+
+                <!-- CSVファイル入力 -->
+                <div id="filePanel" class="input-panel active">
+                    <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+                        <div class="drop-zone-icon">📄</div>
+                        <div class="drop-zone-text"><strong>クリックしてファイルを選択</strong><br>またはここにドラッグ&ドロップ<br><small style="color: #8b949e;">CSV / TSV / PDF 対応（複数PDF可）</small></div>
+                    </div>
+                    <input type="file" id="fileInput" accept=".csv,.txt,.tsv,.xlsx,.xls,.pdf" multiple style="display: none;" onchange="handleFileSelect(this)">
+                    <div id="fileInfo" style="display: none;"></div>
+                </div>
+
+                <!-- テキスト貼り付け -->
+                <div id="pastePanel" class="input-panel">
+                    <textarea class="paste-area" id="pasteArea" placeholder="Excelやテキストデータをここに貼り付けてください&#10;&#10;タブ区切り、カンマ区切りに対応しています"></textarea>
+                    <div style="margin-top: 8px;">
+                        <button class="btn btn-primary btn-sm" onclick="handlePasteData()">データを読み込む</button>
+                    </div>
+                </div>
+
+                <!-- 読み込みオプション -->
+                <div class="option-row">
+                    <div class="option-item">
+                        <label>エンコーディング:</label>
+                        <select id="encodingSelect">
+                            <option value="UTF-8">UTF-8</option>
+                            <option value="Shift_JIS">Shift_JIS</option>
+                        </select>
+                    </div>
+                    <div class="option-item">
+                        <label>区切り文字:</label>
+                        <select id="delimiterSelect">
+                            <option value="auto">自動検出</option>
+                            <option value=",">カンマ (,)</option>
+                            <option value="&#9;">タブ</option>
+                            <option value=";">セミコロン (;)</option>
+                        </select>
+                    </div>
+                    <div class="option-item">
+                        <input type="checkbox" id="hasHeader" checked>
+                        <label for="hasHeader">1行目はヘッダー</label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- データプレビュー -->
+            <div id="dataPreview" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">読み込みプレビュー</span>
+                        <span id="previewCount" class="badge" style="background: var(--bg-hover); color: var(--text-muted);"></span>
+                    </div>
+                    <div class="preview-container" id="previewTable"></div>
+                    <p class="preview-info" id="previewInfo"></p>
+                </div>
+            </div>
+
+            <div class="step-nav">
+                <div></div>
+                <button class="btn btn-primary" onclick="goToStep(2)" id="step1Next" disabled>次へ: カラムマッピング →</button>
+            </div>
+        </div>
+
+        <!-- ===== ステップ2: カラムマッピング ===== -->
+        <div id="step2" class="converter-step">
+            <!-- クイックプリセット -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">クイック設定</span>
+                    <span style="font-size: 12px; color: var(--text-muted);">データの種類に合ったボタンを押すだけ</span>
+                </div>
+                <div class="preset-grid" id="presetButtons"></div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">カラムマッピング</span>
+                    <div style="display: flex; gap: 4px;">
+                        <button class="btn btn-secondary btn-sm" onclick="autoDetectAndApply()">自動推定</button>
+                        <button class="btn btn-secondary btn-sm" onclick="clearAllMapping()">クリア</button>
+                    </div>
+                </div>
+                <div id="mappingStatus" class="mapping-status"></div>
+                <div id="mappingUI"></div>
+            </div>
+
+            <!-- マッピング結果プレビュー -->
+            <div id="mappingPreview" style="display: none;">
+                <div class="card">
+                    <span class="card-title">マッピング結果プレビュー（最初の3行）</span>
+                    <div class="preview-container" id="mappingPreviewTable" style="margin-top: 12px;"></div>
+                </div>
+            </div>
+
+            <div class="step-nav">
+                <button class="btn btn-secondary" onclick="goToStep(1)">← 戻る</button>
+                <button class="btn btn-primary" onclick="goToStep(3)">次へ: 変換ルール →</button>
+            </div>
+        </div>
+
+        <!-- ===== ステップ3: 変換ルール ===== -->
+        <div id="step3" class="converter-step">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">変換ルール設定</span>
+                </div>
+
+                <!-- 日付変換 -->
+                <div class="rule-section">
+                    <div class="rule-section-title">📅 日付変換</div>
+                    <div class="option-item" style="margin-bottom: 8px;">
+                        <label>入力日付の形式:</label>
+                        <select id="dateFormatSelect" class="form-select" style="width: auto; min-width: 250px;"></select>
+                    </div>
+                    <p id="dateDetectInfo" style="font-size: 12px; color: var(--text-muted);"></p>
+                </div>
+
+                <!-- 勘定科目マッピング -->
+                <div class="rule-section">
+                    <div class="rule-section-title">📝 勘定科目マッピング</div>
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        入力データの科目名をMFの勘定科目名に変換します（プリセット + カスタム）
+                    </p>
+                    <div id="accountMappingList"></div>
+                    <button class="btn btn-secondary btn-sm" onclick="addAccountMappingRow()" style="margin-top: 8px;">+ マッピング追加</button>
+                </div>
+
+                <!-- 固定値設定 -->
+                <div class="rule-section">
+                    <div class="rule-section-title">📌 固定値設定</div>
+                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                        全行に同じ値を設定するフィールド（マッピングより優先されます）
+                    </p>
+                    <div id="fixedValueList"></div>
+                </div>
+            </div>
+
+            <div class="step-nav">
+                <button class="btn btn-secondary" onclick="goToStep(2)">← 戻る</button>
+                <button class="btn btn-primary" onclick="goToStep(4)">次へ: プレビュー・出力 →</button>
+            </div>
+        </div>
+
+        <!-- ===== ステップ4: プレビュー & エクスポート ===== -->
+        <div id="step4" class="converter-step">
+            <div id="conversionResult"></div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">変換結果プレビュー</span>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 12px; color: var(--text-muted);">セルをクリックして訂正可能</span>
+                        <span id="resultCount" class="badge" style="background: var(--bg-hover); color: var(--text-muted);"></span>
+                    </div>
+                </div>
+                <div class="filter-bar" id="filterBar" style="display: none;">
+                    <button class="filter-btn active" onclick="setResultFilter('all')">すべて</button>
+                    <button class="filter-btn" onclick="setResultFilter('errors')" id="filterErrorBtn">エラーのみ</button>
+                </div>
+                <div class="preview-container" id="resultTable"></div>
+                <button class="btn btn-secondary btn-sm" id="showMoreBtn" style="display: none; margin-top: 8px;" onclick="showMoreResults()">さらに表示</button>
+            </div>
+
+            <!-- 訂正ルール一覧 -->
+            <div class="card correction-rules-card" id="correctionRulesCard" style="display: none;">
+                <div class="card-header">
+                    <span class="card-title">訂正ルール</span>
+                    <div style="display: flex; gap: 4px;">
+                        <button class="btn btn-secondary btn-sm" onclick="applyCorrectionsAndRerun()">ルールを適用して再変換</button>
+                        <button class="btn btn-danger btn-sm" onclick="clearAllCorrectionRules()">全削除</button>
+                    </div>
+                </div>
+                <div id="correctionRulesList"></div>
+            </div>
+
+            <!-- 仕訳パターン -->
+            <div class="card journal-patterns-card" id="journalPatternsCard" style="display: none;">
+                <div class="card-header">
+                    <span class="card-title">🔄 仕訳パターン <span class="pattern-count-badge" id="patternCountBadge"></span></span>
+                    <div style="display: flex; gap: 4px;">
+                        <button class="btn btn-secondary btn-sm" onclick="importJournalPatterns()">📥 過去仕訳インポート</button>
+                        <button class="btn btn-secondary btn-sm" onclick="applyPatternsAndRerun()">再適用</button>
+                        <button class="btn btn-danger btn-sm" onclick="clearAllPatterns()">全削除</button>
+                    </div>
+                </div>
+                <div class="pattern-info" id="patternInfo">
+                    <span>会社を選択し、過去月のMF仕訳帳CSV/PDFをインポートすると、摘要から自動で仕訳パターンを学習します</span>
+                </div>
+                <div id="journalPatternsList"></div>
+                <input type="file" id="patternFileInput" accept=".csv,.txt,.pdf" style="display: none;" onchange="handlePatternFileSelect(this)">
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">エクスポート</span>
+                </div>
+                <div class="export-actions">
+                    <button class="btn btn-primary" onclick="exportCSV()">📥 CSVダウンロード</button>
+                    <button class="btn btn-secondary" onclick="copyToClipboard()">📋 クリップボードにコピー</button>
+                    <button class="btn btn-secondary" onclick="openTemplateSaveModal()">💾 テンプレート保存</button>
+                </div>
+            </div>
+
+            <div class="shortcut-hints">
+                <span><kbd>Ctrl</kbd>+<kbd>S</kbd> CSVダウンロード</span>
+                <span><kbd>Ctrl</kbd>+<kbd>C</kbd> クリップボードにコピー</span>
+                <span><kbd>Esc</kbd> 前のステップ</span>
+            </div>
+
+            <div class="step-nav">
+                <button class="btn btn-secondary" onclick="goToStep(3)">← 戻る</button>
+                <button class="btn btn-secondary" onclick="resetConverter()">最初からやり直す</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- テンプレート保存モーダル -->
+    <div class="modal-overlay" id="templateSaveModal">
+        <div class="modal">
+            <div class="modal-title">テンプレートを保存</div>
+            <div class="form-group">
+                <label class="form-label">テンプレート名</label>
+                <input type="text" class="form-input" id="templateNameInput" placeholder="例: A社月次仕訳">
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal('templateSaveModal')">キャンセル</button>
+                <button class="btn btn-primary" onclick="saveCurrentTemplate()">保存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- テンプレート読み込みモーダル -->
+    <div class="modal-overlay" id="templateLoadModal">
+        <div class="modal">
+            <div class="modal-title">テンプレートを読み込む</div>
+            <div class="template-list" id="templateList"></div>
+            <div id="noTemplates" class="empty-state" style="padding: 24px;">
+                <div class="empty-text">保存されたテンプレートはありません</div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-secondary" onclick="closeModal('templateLoadModal')">閉じる</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ルール保存ポップアップ -->
+    <div class="rule-popup" id="rulePopup">
+        <div class="rule-popup-title">この訂正をルールとして保存しますか？</div>
+        <div class="rule-popup-detail" id="rulePopupDetail"></div>
+        <div class="rule-popup-actions">
+            <button class="btn btn-secondary btn-sm" onclick="dismissRulePopup()">今回だけ</button>
+            <button class="btn btn-primary btn-sm" onclick="saveRuleFromPopup()">ルールとして保存</button>
+        </div>
+    </div>
+
+    <!-- OCRプログレスモーダル -->
+    <div class="modal-overlay" id="ocrProgressModal">
+        <div class="modal" style="max-width: 420px;">
+            <div class="modal-title">📄 PDF読み取り中...</div>
+            <div id="ocrProgressStatus" style="color: #8b949e; margin-bottom: 12px;">準備中...</div>
+            <div class="ocr-progress-bar-container">
+                <div class="ocr-progress-bar" id="ocrProgressBar" style="width: 0%;"></div>
+            </div>
+            <div id="ocrProgressPercent" style="text-align: center; color: #c9d1d9; margin-top: 8px;">0%</div>
+        </div>
+    </div>
+
+    <!-- PDF.js ライブラリ（PDFテキスト抽出用） -->
+    <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+    <script>
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+    </script>
+    <!-- Tesseract.js ライブラリ（スキャンPDFのOCR用） -->
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="converter-data.js"></script>
+    <script src="converter-engine.js"></script>
+    <script src="converter.js"></script>
+</body>
+</html>
