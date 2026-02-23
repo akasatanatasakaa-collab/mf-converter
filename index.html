@@ -890,13 +890,7 @@
                 <span class="step-number">1</span>データ入力
             </div>
             <div class="step-item" onclick="goToStep(2)">
-                <span class="step-number">2</span>カラムマッピング
-            </div>
-            <div class="step-item" onclick="goToStep(3)">
-                <span class="step-number">3</span>変換ルール
-            </div>
-            <div class="step-item" onclick="goToStep(4)">
-                <span class="step-number">4</span>プレビュー・出力
+                <span class="step-number">2</span>プレビュー・出力
             </div>
         </div>
 
@@ -918,9 +912,9 @@
                 <div id="filePanel" class="input-panel active">
                     <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
                         <div class="drop-zone-icon">📄</div>
-                        <div class="drop-zone-text"><strong>クリックしてファイルを選択</strong><br>またはここにドラッグ&ドロップ<br><small style="color: #8b949e;">CSV / TSV / PDF 対応（複数PDF可）</small></div>
+                        <div class="drop-zone-text"><strong>クリックしてファイルを選択</strong><br>またはここにドラッグ&ドロップ<br><small style="color: #8b949e;">CSV / TSV / PDF / 画像 / 動画 対応（複数ファイル可）</small></div>
                     </div>
-                    <input type="file" id="fileInput" accept=".csv,.txt,.tsv,.xlsx,.xls,.pdf" multiple style="display: none;" onchange="handleFileSelect(this)">
+                    <input type="file" id="fileInput" accept=".csv,.txt,.tsv,.xlsx,.xls,.pdf,.jpg,.jpeg,.png,.webp,.mp4,.mov,.webm" multiple style="display: none;" onchange="handleFileSelect(this)">
                     <div id="fileInfo" style="display: none;"></div>
                 </div>
 
@@ -969,110 +963,156 @@
                 </div>
             </div>
 
+            <!-- 動画検出結果の確認パネル -->
+            <div id="videoVerification" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">動画から検出したレシート</span>
+                        <span id="videoReceiptCount" class="badge" style="background: var(--bg-hover); color: var(--text-muted);"></span>
+                    </div>
+                    <p style="color: var(--text-muted); font-size: 13px; margin-bottom: 12px;">
+                        抽出されたフレームと検出結果を確認してください。漏れがあればスクリーンショットを画像としてアップロードできます。
+                    </p>
+                    <div class="video-verify-layout">
+                        <div class="video-frame-grid" id="videoFrameGrid"></div>
+                        <div class="video-receipt-list" id="videoReceiptList"></div>
+                    </div>
+                </div>
+            </div>
+
             <div class="step-nav">
                 <div></div>
-                <button class="btn btn-primary" onclick="goToStep(2)" id="step1Next" disabled>次へ: カラムマッピング →</button>
+                <button class="btn btn-primary" onclick="goToStep(2)" id="step1Next" disabled>次へ: 変換・プレビュー →</button>
             </div>
         </div>
 
-        <!-- ===== ステップ2: カラムマッピング ===== -->
+        <!-- ===== ステップ2: プレビュー & エクスポート ===== -->
         <div id="step2" class="converter-step">
-            <!-- クイックプリセット -->
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">クイック設定</span>
-                    <span style="font-size: 12px; color: var(--text-muted);">データの種類に合ったボタンを押すだけ</span>
-                </div>
-                <div class="preset-grid" id="presetButtons"></div>
-            </div>
+            <!-- 折りたたみ: カラムマッピング -->
+            <details class="advanced-panel" id="mappingPanel">
+                <summary class="advanced-summary">
+                    カラムマッピング <span class="badge" id="mappingBadge"></span>
+                </summary>
+                <div class="advanced-content">
+                    <!-- クイックプリセット -->
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">クイック設定</span>
+                            <span style="font-size: 12px; color: var(--text-muted);">データの種類に合ったボタンを押すだけ</span>
+                        </div>
+                        <div class="preset-grid" id="presetButtons"></div>
+                    </div>
 
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">カラムマッピング</span>
-                    <div style="display: flex; gap: 4px;">
-                        <button class="btn btn-secondary btn-sm" onclick="autoDetectAndApply()">自動推定</button>
-                        <button class="btn btn-secondary btn-sm" onclick="clearAllMapping()">クリア</button>
+                    <div class="card">
+                        <div class="card-header">
+                            <span class="card-title">カラムマッピング</span>
+                            <div style="display: flex; gap: 4px;">
+                                <button class="btn btn-secondary btn-sm" onclick="autoDetectAndApply()">自動推定</button>
+                                <button class="btn btn-secondary btn-sm" onclick="clearAllMapping()">クリア</button>
+                            </div>
+                        </div>
+                        <div id="mappingStatus" class="mapping-status"></div>
+                        <div id="mappingUI"></div>
+                    </div>
+
+                    <!-- マッピング結果プレビュー -->
+                    <div id="mappingPreview" style="display: none;">
+                        <div class="card">
+                            <span class="card-title">マッピング結果プレビュー（最初の3行）</span>
+                            <div class="preview-container" id="mappingPreviewTable" style="margin-top: 12px;"></div>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 8px;">
+                        <button class="btn btn-primary btn-sm" onclick="applyMappingAndRerun()">適用して再変換</button>
                     </div>
                 </div>
-                <div id="mappingStatus" class="mapping-status"></div>
-                <div id="mappingUI"></div>
-            </div>
+            </details>
 
-            <!-- マッピング結果プレビュー -->
-            <div id="mappingPreview" style="display: none;">
-                <div class="card">
-                    <span class="card-title">マッピング結果プレビュー（最初の3行）</span>
-                    <div class="preview-container" id="mappingPreviewTable" style="margin-top: 12px;"></div>
-                </div>
-            </div>
-
-            <div class="step-nav">
-                <button class="btn btn-secondary" onclick="goToStep(1)">← 戻る</button>
-                <button class="btn btn-primary" onclick="goToStep(3)">次へ: 変換ルール →</button>
-            </div>
-        </div>
-
-        <!-- ===== ステップ3: 変換ルール ===== -->
-        <div id="step3" class="converter-step">
-            <div class="card">
-                <div class="card-header">
-                    <span class="card-title">変換ルール設定</span>
-                </div>
-
-                <!-- 日付変換 -->
-                <div class="rule-section">
-                    <div class="rule-section-title">📅 日付変換</div>
-                    <div class="option-item" style="margin-bottom: 8px;">
-                        <label>入力日付の形式:</label>
-                        <select id="dateFormatSelect" class="form-select" style="width: auto; min-width: 250px;"></select>
+            <!-- 折りたたみ: 変換ルール -->
+            <details class="advanced-panel" id="rulesPanel">
+                <summary class="advanced-summary">
+                    変換ルール <span class="badge" id="rulesBadge"></span>
+                </summary>
+                <div class="advanced-content">
+                    <!-- 日付変換 -->
+                    <div class="rule-section">
+                        <div class="rule-section-title">日付変換</div>
+                        <div class="option-item" style="margin-bottom: 8px;">
+                            <label>入力日付の形式:</label>
+                            <select id="dateFormatSelect" class="form-select" style="width: auto; min-width: 250px;"></select>
+                        </div>
+                        <p id="dateDetectInfo" style="font-size: 12px; color: var(--text-muted);"></p>
                     </div>
-                    <p id="dateDetectInfo" style="font-size: 12px; color: var(--text-muted);"></p>
+
+                    <!-- 勘定科目マッピング -->
+                    <div class="rule-section">
+                        <div class="rule-section-title">勘定科目マッピング</div>
+                        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                            入力データの科目名をMFの勘定科目名に変換します（プリセット + カスタム）
+                        </p>
+                        <div id="accountMappingList"></div>
+                        <button class="btn btn-secondary btn-sm" onclick="addAccountMappingRow()" style="margin-top: 8px;">+ マッピング追加</button>
+                    </div>
+
+                    <!-- 固定値設定 -->
+                    <div class="rule-section">
+                        <div class="rule-section-title">固定値設定</div>
+                        <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
+                            全行に同じ値を設定するフィールド（マッピングより優先されます）
+                        </p>
+                        <div id="fixedValueList"></div>
+                    </div>
+
+                    <div style="margin-top: 8px;">
+                        <button class="btn btn-primary btn-sm" onclick="applyRulesAndRerun()">適用して再変換</button>
+                    </div>
                 </div>
-
-                <!-- 勘定科目マッピング -->
-                <div class="rule-section">
-                    <div class="rule-section-title">📝 勘定科目マッピング</div>
-                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
-                        入力データの科目名をMFの勘定科目名に変換します（プリセット + カスタム）
-                    </p>
-                    <div id="accountMappingList"></div>
-                    <button class="btn btn-secondary btn-sm" onclick="addAccountMappingRow()" style="margin-top: 8px;">+ マッピング追加</button>
-                </div>
-
-                <!-- 固定値設定 -->
-                <div class="rule-section">
-                    <div class="rule-section-title">📌 固定値設定</div>
-                    <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">
-                        全行に同じ値を設定するフィールド（マッピングより優先されます）
-                    </p>
-                    <div id="fixedValueList"></div>
-                </div>
-            </div>
-
-            <div class="step-nav">
-                <button class="btn btn-secondary" onclick="goToStep(2)">← 戻る</button>
-                <button class="btn btn-primary" onclick="goToStep(4)">次へ: プレビュー・出力 →</button>
-            </div>
-        </div>
-
-        <!-- ===== ステップ4: プレビュー & エクスポート ===== -->
-        <div id="step4" class="converter-step">
+            </details>
             <div id="conversionResult"></div>
+            <div id="geminiEstimateIndicator" class="gemini-indicator" style="display: none;">
+                <div class="gemini-indicator-inner">
+                    <div class="gemini-spinner"></div>
+                    <span>Gemini で科目・税区分を補完中...</span>
+                </div>
+            </div>
 
             <div class="card">
                 <div class="card-header">
                     <span class="card-title">変換結果プレビュー</span>
                     <div style="display: flex; align-items: center; gap: 8px;">
-                        <span style="font-size: 12px; color: var(--text-muted);">セルをクリックして訂正可能</span>
+                        <div class="view-toggle" id="viewToggle" style="display: none;">
+                            <button class="view-toggle-btn active" data-view="table" onclick="setPreviewMode('table')">一覧</button>
+                            <button class="view-toggle-btn" data-view="detail" onclick="setPreviewMode('detail')">詳細</button>
+                        </div>
                         <span id="resultCount" class="badge" style="background: var(--bg-hover); color: var(--text-muted);"></span>
                     </div>
                 </div>
-                <div class="filter-bar" id="filterBar" style="display: none;">
-                    <button class="filter-btn active" onclick="setResultFilter('all')">すべて</button>
-                    <button class="filter-btn" onclick="setResultFilter('errors')" id="filterErrorBtn">エラーのみ</button>
+
+                <!-- テーブルビュー -->
+                <div id="tableView">
+                    <div class="filter-bar" id="filterBar" style="display: none;">
+                        <button class="filter-btn active" onclick="setResultFilter('all')">すべて</button>
+                        <button class="filter-btn" onclick="setResultFilter('errors')" id="filterErrorBtn">エラーのみ</button>
+                    </div>
+                    <div class="preview-container" id="resultTable"></div>
+                    <button class="btn btn-secondary btn-sm" id="showMoreBtn" style="display: none; margin-top: 8px;" onclick="showMoreResults()">さらに表示</button>
                 </div>
-                <div class="preview-container" id="resultTable"></div>
-                <button class="btn btn-secondary btn-sm" id="showMoreBtn" style="display: none; margin-top: 8px;" onclick="showMoreResults()">さらに表示</button>
+
+                <!-- STREAMED風 詳細ビュー -->
+                <div id="detailView" style="display: none;">
+                    <div class="detail-nav">
+                        <button class="btn btn-secondary btn-sm" onclick="detailPrev()">&lt;</button>
+                        <span id="detailNavInfo">1 / 1</span>
+                        <button class="btn btn-secondary btn-sm" onclick="detailNext()">&gt;</button>
+                    </div>
+                    <div class="detail-layout">
+                        <div class="detail-image" id="detailImage">
+                            <div class="detail-no-image">元資料なし</div>
+                        </div>
+                        <div class="detail-form" id="detailForm"></div>
+                    </div>
+                </div>
             </div>
 
             <!-- 訂正ルール一覧 -->
@@ -1122,7 +1162,7 @@
             </div>
 
             <div class="step-nav">
-                <button class="btn btn-secondary" onclick="goToStep(3)">← 戻る</button>
+                <button class="btn btn-secondary" onclick="goToStep(1)">← 戻る</button>
                 <button class="btn btn-secondary" onclick="resetConverter()">最初からやり直す</button>
             </div>
         </div>
@@ -1169,13 +1209,14 @@
 
     <!-- OCRプログレスモーダル -->
     <div class="modal-overlay" id="ocrProgressModal">
-        <div class="modal" style="max-width: 420px;">
+        <div class="modal" style="max-width: 520px;">
             <div class="modal-title">📄 PDF読み取り中...</div>
             <div id="ocrProgressStatus" style="color: #8b949e; margin-bottom: 12px;">準備中...</div>
             <div class="ocr-progress-bar-container">
                 <div class="ocr-progress-bar" id="ocrProgressBar" style="width: 0%;"></div>
             </div>
-            <div id="ocrProgressPercent" style="text-align: center; color: #c9d1d9; margin-top: 8px;">0%</div>
+            <div id="ocrProgressPercent" style="text-align: center; color: #c9d1d9; margin-top: 8px; font-family: 'Consolas', 'Monaco', monospace; font-size: 13px;">0.000%</div>
+            <pre id="ocrStreamText" style="display: none; margin-top: 12px; max-height: 180px; overflow-y: auto; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; font-size: 11px; color: #8b949e; white-space: pre-wrap; word-break: break-all; line-height: 1.4;"></pre>
         </div>
     </div>
 

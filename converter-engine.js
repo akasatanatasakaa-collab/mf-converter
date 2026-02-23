@@ -379,10 +379,41 @@ function convertToMFFormat(rawRows, headers, mapping, rules) {
         const mfRow = {};
 
         // マッピングに従ってフィールドを割り当て
+        const mappedIndices = new Set();
         for (const [sourceIdx, mfField] of Object.entries(mapping)) {
             const idx = parseInt(sourceIdx);
             const value = idx < row.length ? row[idx] : '';
             mfRow[mfField] = value;
+            mappedIndices.add(idx);
+        }
+
+        // 未マッピングカラムのテキストを摘要に追記
+        // （数値のみ・日付のみ・空のセルは除外し、摘要の補足情報になりそうなテキストを追加）
+        const unmappedTexts = [];
+        row.forEach((cell, idx) => {
+            if (mappedIndices.has(idx)) return;
+            const val = String(cell || '').trim();
+            if (!val) return;
+            // 数値のみ（金額・残高カラム等）はスキップ
+            if (/^[¥￥$]?[\d,.\-]+$/.test(val)) return;
+            // 日付パターンのみはスキップ
+            if (/^\d{2,4}[\/-]\d{1,2}[\/-]\d{1,2}$/.test(val)) return;
+            // ヘッダー名そのものはスキップ
+            if (headers[idx] && val === headers[idx].trim()) return;
+            unmappedTexts.push(val);
+        });
+        if (unmappedTexts.length > 0) {
+            const existing = String(mfRow.tekiyou || '').trim();
+            const extra = unmappedTexts.join(' ');
+            // 既存の摘要と重複しないもののみ追記
+            if (existing) {
+                const newParts = unmappedTexts.filter(t => !existing.includes(t));
+                if (newParts.length > 0) {
+                    mfRow.tekiyou = existing + ' ' + newParts.join(' ');
+                }
+            } else {
+                mfRow.tekiyou = extra;
+            }
         }
 
         // 「例」マーカー行を検出したら以降全てスキップ
@@ -1119,93 +1150,392 @@ function buildMFRowsFromGeminiResult(geminiResult, journalPatterns, correctionRu
         expense_report: '経費精算書', sales_data: '売上データ', other: 'その他'
     };
 
+    // 税率→税区分の変換
+    function taxRateToZeiku(rate, isIncome) {
+        if (rate === '10%') return isIncome ? '課税売上10%' : '課対仕入10%';
+        if (rate === '8%') return isIncome ? '課税売上8%（軽減）' : '課対仕入8%（軽減）';
+        return '';
+    }
+
     for (const entry of entries) {
-        const mfRow = {};
-
-        // 取引日
-        mfRow.torihikiDate = entry.date || '';
-
-        // 金額
-        const amount = entry.amount || 0;
-        if (entry.isIncome) {
-            // 入金：借方=現金等、貸方=売上等
-            mfRow.kashiKingaku = amount;
-            mfRow.kariKingaku = amount;
-        } else {
-            // 支払：借方=経費等、貸方=現金等
-            mfRow.kariKingaku = amount;
-            mfRow.kashiKingaku = amount;
+        // 品目の税率が混在するか判定
+        const itemTaxRates = new Set();
+        if (entry.items && entry.items.length > 0) {
+            entry.items.forEach(i => { if (i.taxRate) itemTaxRates.add(i.taxRate); });
         }
+        const hasMixedTax = itemTaxRates.size >= 2;
 
-        // 取引先
-        mfRow.torihikisaki = entry.counterparty || '';
-
-        // 摘要を組み立て
-        const parts = [];
-        if (entry.counterparty) parts.push(entry.counterparty);
-        if (entry.description) parts.push(entry.description);
-        if (parts.length === 0 && entry.items && entry.items.length > 0) {
-            parts.push(entry.items.slice(0, 3).map(i => i.name).join('、'));
-        }
-        mfRow.tekiyou = parts.join(' ') || '';
-
-        // 税率から税区分を推定
-        if (entry.taxRate === '10%') {
-            mfRow.kariZeiku = entry.isIncome ? '課税売上10%' : '課対仕入10%';
-        } else if (entry.taxRate === '8%') {
-            mfRow.kariZeiku = entry.isIncome ? '課税売上8%' : '課対仕入8%';
-        }
-
-        // ① 固定科目（通帳・小口現金 = 口座が確定している書類）
-        //    これらは仕訳パターンで上書きしない
-        if (!entry.isIncome) {
-            if (docType === 'bank_statement') mfRow.kashiKamoku = '普通預金';
-            if (docType === 'petty_cash') mfRow.kashiKamoku = '小口現金';
-        } else {
-            if (docType === 'bank_statement') mfRow.kariKamoku = '普通預金';
-            if (docType === 'petty_cash') mfRow.kariKamoku = '小口現金';
-        }
-
-        // ② 仕訳パターンを適用（空フィールドを埋める + 補助科目含む）
-        const matched = applyJournalPatterns(mfRow, journalPatterns || []);
-        if (matched) {
-            mfRow._matchedPattern = matched.id;
-            mfRow._matchedKeyword = matched.keyword;
-        }
-
-        // ③ 業種デフォルト勘定科目（借方 or 貸方の空き側）
-        const targetField = entry.isIncome ? 'kashiKamoku' : 'kariKamoku';
-        if (!mfRow[targetField] && mfRow.tekiyou) {
-            const defaultKamoku = matchDefaultAccount(mfRow.tekiyou, industry || '');
-            if (defaultKamoku) {
-                mfRow[targetField] = defaultKamoku;
-                mfRow._defaultAccount = true;
+        if (hasMixedTax && entry.items.length > 0) {
+            // ===== 複合仕訳: 税率ごとにグループ化して複数行 =====
+            const groups = {};
+            for (const item of entry.items) {
+                const rate = item.taxRate || 'unknown';
+                if (!groups[rate]) groups[rate] = { items: [], total: 0 };
+                groups[rate].items.push(item);
+                groups[rate].total += (Number(item.amount) || 0);
             }
+
+            const totalAmount = entry.amount || Object.values(groups).reduce((s, g) => s + g.total, 0);
+            const groupKeys = Object.keys(groups).sort(); // 安定した順序
+            let isFirstRow = true;
+
+            for (const rate of groupKeys) {
+                const group = groups[rate];
+                const mfRow = {};
+
+                mfRow.torihikiDate = entry.date || '';
+                mfRow.torihikisaki = entry.counterparty || '';
+
+                // 摘要: 1行目はエントリ全体、2行目以降はグループ内品目
+                if (isFirstRow) {
+                    const parts = [];
+                    if (entry.counterparty) parts.push(entry.counterparty);
+                    if (entry.description) parts.push(entry.description);
+                    if (parts.length === 0) parts.push(group.items.slice(0, 3).map(i => i.name).join('、'));
+                    mfRow.tekiyou = parts.join(' ') || '';
+                } else {
+                    mfRow.tekiyou = group.items.slice(0, 3).map(i => i.name).join('、');
+                }
+
+                // 金額: 借方=グループ小計、貸方=1行目のみ合計
+                if (entry.isIncome) {
+                    mfRow.kashiKingaku = isFirstRow ? totalAmount : '';
+                    mfRow.kariKingaku = isFirstRow ? totalAmount : '';
+                } else {
+                    mfRow.kariKingaku = group.total;
+                    mfRow.kashiKingaku = isFirstRow ? totalAmount : '';
+                }
+
+                // 税区分
+                mfRow.kariZeiku = taxRateToZeiku(rate, entry.isIncome);
+
+                // 固定科目（1行目のみ貸方/借方設定）
+                if (isFirstRow) {
+                    if (!entry.isIncome) {
+                        if (docType === 'bank_statement') mfRow.kashiKamoku = '普通預金';
+                        if (docType === 'petty_cash') mfRow.kashiKamoku = '小口現金';
+                    } else {
+                        if (docType === 'bank_statement') mfRow.kariKamoku = '普通預金';
+                        if (docType === 'petty_cash') mfRow.kariKamoku = '小口現金';
+                    }
+                }
+
+                // 仕訳パターン適用
+                const matched = applyJournalPatterns(mfRow, journalPatterns || []);
+                if (matched) {
+                    mfRow._matchedPattern = matched.id;
+                    mfRow._matchedKeyword = matched.keyword;
+                }
+
+                // 業種デフォルト勘定科目
+                const targetField = entry.isIncome ? 'kashiKamoku' : 'kariKamoku';
+                if (!mfRow[targetField] && mfRow.tekiyou) {
+                    const defaultKamoku = matchDefaultAccount(mfRow.tekiyou, industry || '');
+                    if (defaultKamoku) {
+                        mfRow[targetField] = defaultKamoku;
+                        mfRow._defaultAccount = true;
+                    }
+                }
+
+                // 書類種別フォールバック（1行目のみ）
+                if (isFirstRow && !mfRow.kashiKamoku) {
+                    if (docType === 'invoice') mfRow.kashiKamoku = '買掛金';
+                    else if (docType === 'credit_card') mfRow.kashiKamoku = '未払金';
+                    else if (docType === 'expense_report') mfRow.kashiKamoku = '未払金';
+                }
+                if (isFirstRow && !mfRow.kashiKamoku && defaultKashi) {
+                    mfRow.kashiKamoku = defaultKashi;
+                }
+
+                applyCorrectionRules(mfRow, correctionRules || []);
+
+                mfRow._isReceipt = true;
+                mfRow._documentType = docType;
+                mfRow._documentTypeLabel = docTypeLabels[docType] || docType;
+                mfRow._receiptConfidence = geminiResult.confidence;
+                mfRow._isCompound = true;
+                mfRow._compoundRow = isFirstRow ? 'main' : 'sub';
+
+                rows.push(mfRow);
+                isFirstRow = false;
+            }
+        } else {
+            // ===== 単一仕訳: 従来通り1行 =====
+            const mfRow = {};
+
+            mfRow.torihikiDate = entry.date || '';
+
+            const amount = entry.amount || 0;
+            if (entry.isIncome) {
+                mfRow.kashiKingaku = amount;
+                mfRow.kariKingaku = amount;
+            } else {
+                mfRow.kariKingaku = amount;
+                mfRow.kashiKingaku = amount;
+            }
+
+            mfRow.torihikisaki = entry.counterparty || '';
+
+            const parts = [];
+            if (entry.counterparty) parts.push(entry.counterparty);
+            if (entry.description) parts.push(entry.description);
+            if (parts.length === 0 && entry.items && entry.items.length > 0) {
+                parts.push(entry.items.slice(0, 3).map(i => i.name).join('、'));
+            }
+            mfRow.tekiyou = parts.join(' ') || '';
+
+            // 税率から税区分を推定
+            mfRow.kariZeiku = taxRateToZeiku(entry.taxRate, entry.isIncome);
+
+            // ① 固定科目
+            if (!entry.isIncome) {
+                if (docType === 'bank_statement') mfRow.kashiKamoku = '普通預金';
+                if (docType === 'petty_cash') mfRow.kashiKamoku = '小口現金';
+            } else {
+                if (docType === 'bank_statement') mfRow.kariKamoku = '普通預金';
+                if (docType === 'petty_cash') mfRow.kariKamoku = '小口現金';
+            }
+
+            // ② 仕訳パターン
+            const matched = applyJournalPatterns(mfRow, journalPatterns || []);
+            if (matched) {
+                mfRow._matchedPattern = matched.id;
+                mfRow._matchedKeyword = matched.keyword;
+            }
+
+            // ③ 業種デフォルト勘定科目
+            const targetField = entry.isIncome ? 'kashiKamoku' : 'kariKamoku';
+            if (!mfRow[targetField] && mfRow.tekiyou) {
+                const defaultKamoku = matchDefaultAccount(mfRow.tekiyou, industry || '');
+                if (defaultKamoku) {
+                    mfRow[targetField] = defaultKamoku;
+                    mfRow._defaultAccount = true;
+                }
+            }
+
+            // ④ 書類種別フォールバック
+            if (!mfRow.kashiKamoku) {
+                if (docType === 'invoice') mfRow.kashiKamoku = '買掛金';
+                else if (docType === 'credit_card') mfRow.kashiKamoku = '未払金';
+                else if (docType === 'expense_report') mfRow.kashiKamoku = '未払金';
+            }
+
+            // ⑤ デフォルト貸方
+            if (!mfRow.kashiKamoku && defaultKashi) {
+                mfRow.kashiKamoku = defaultKashi;
+            }
+
+            applyCorrectionRules(mfRow, correctionRules || []);
+
+            mfRow._isReceipt = true;
+            mfRow._documentType = docType;
+            mfRow._documentTypeLabel = docTypeLabels[docType] || docType;
+            mfRow._receiptConfidence = geminiResult.confidence;
+
+            rows.push(mfRow);
         }
-
-        // ④ 書類種別フォールバック（パターンで埋まらなかった場合の貸方デフォルト）
-        if (!mfRow.kashiKamoku) {
-            if (docType === 'invoice') mfRow.kashiKamoku = '買掛金';
-            else if (docType === 'credit_card') mfRow.kashiKamoku = '未払金';
-            else if (docType === 'expense_report') mfRow.kashiKamoku = '未払金';
-        }
-
-        // ⑤ ユーザー設定のデフォルト貸方（それでも埋まらなかった場合）
-        if (!mfRow.kashiKamoku && defaultKashi) {
-            mfRow.kashiKamoku = defaultKashi;
-        }
-
-        // 訂正ルールを適用
-        applyCorrectionRules(mfRow, correctionRules || []);
-
-        // メタ情報
-        mfRow._isReceipt = true;
-        mfRow._documentType = docType;
-        mfRow._documentTypeLabel = docTypeLabels[docType] || docType;
-        mfRow._receiptConfidence = geminiResult.confidence;
-
-        rows.push(mfRow);
     }
 
     return rows;
+}
+
+// ===== 動画フレーム抽出（確認用プレビュー） =====
+
+// video要素を指定時刻にシーク（Promise化）
+function seekTo(video, time) {
+    return new Promise((resolve) => {
+        let resolved = false;
+        const done = () => {
+            if (resolved) return;
+            resolved = true;
+            resolve();
+        };
+        video.addEventListener('seeked', done, { once: true });
+        video.currentTime = time;
+        setTimeout(done, 3000); // タイムアウト
+    });
+}
+
+// 指定タイムスタンプの位置から直接フレームを抽出（エントリ用プレビュー）
+// キーフレーム精度問題の対策: 周辺3点にシークし最も近いフレームを採用
+async function extractFramesAtTimestamps(file, timestamps) {
+    return new Promise((resolve, reject) => {
+        const video = document.createElement('video');
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+
+        video.muted = true;
+        video.preload = 'auto';
+        video.playsInline = true;
+
+        const url = URL.createObjectURL(file);
+        video.src = url;
+
+        video.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error('動画の読み込みに失敗'));
+        };
+
+        video.onloadedmetadata = async () => {
+            try {
+                canvas.width = Math.min(video.videoWidth, 1280);
+                canvas.height = Math.round(canvas.width * video.videoHeight / video.videoWidth);
+
+                const frames = [];
+                for (let i = 0; i < timestamps.length; i++) {
+                    const target = timestamps[i];
+                    // 周辺3点にシークして最も目標に近いフレームを採用
+                    const offsets = [-1.0, 0, 1.0];
+                    let bestBase64 = '';
+                    let bestDist = Infinity;
+                    let bestActual = 0;
+
+                    for (const offset of offsets) {
+                        const time = Math.max(0, Math.min(target + offset, video.duration - 0.1));
+                        await seekTo(video, time);
+                        const actual = video.currentTime;
+                        const dist = Math.abs(actual - target);
+                        if (dist < bestDist) {
+                            bestDist = dist;
+                            bestActual = actual;
+                            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                            bestBase64 = canvas.toDataURL('image/jpeg', 0.85).replace(/^data:image\/jpeg;base64,/, '');
+                        }
+                    }
+
+                    frames.push({ time: bestActual, base64: bestBase64 });
+                    console.log(`[Video] タイムスタンプフレーム ${i + 1}/${timestamps.length}: 要求=${target.toFixed(1)}秒 → 実際=${bestActual.toFixed(1)}秒 (誤差${bestDist.toFixed(2)}秒)`);
+                }
+
+                URL.revokeObjectURL(url);
+                resolve(frames);
+            } catch (e) {
+                URL.revokeObjectURL(url);
+                reject(e);
+            }
+        };
+    });
+}
+
+// 動画からシーンチェンジを検出してフレーム画像を抽出（表示専用）
+async function extractVideoFrames(file, onProgress) {
+    return new Promise((resolve, reject) => {
+        const video = document.createElement('video');
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+
+        video.muted = true;
+        video.preload = 'auto';
+        video.playsInline = true;
+
+        const url = URL.createObjectURL(file);
+        video.src = url;
+
+        video.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error('動画ファイルの読み込みに失敗しました。対応形式: MP4, WebM'));
+        };
+
+        video.onloadedmetadata = async () => {
+            try {
+                const duration = video.duration;
+                if (!duration || duration <= 0) {
+                    URL.revokeObjectURL(url);
+                    reject(new Error('動画の長さを取得できません'));
+                    return;
+                }
+
+                console.log(`[Video] 動画の長さ: ${duration.toFixed(1)}秒, readyState: ${video.readyState}`);
+
+                // サンプリング間隔を動的調整
+                let interval = 0.5;
+                if (duration > 300) interval = duration / 600;
+                if (duration > 600) interval = 2.0;
+
+                const totalSamples = Math.floor(duration / interval);
+                canvas.width = Math.min(video.videoWidth, 1280);
+                canvas.height = Math.round(canvas.width * video.videoHeight / video.videoWidth);
+
+                console.log(`[Video] サンプリング: ${totalSamples + 1}フレーム, 間隔${interval.toFixed(2)}秒`);
+
+                const rawFrames = [];
+
+                for (let i = 0; i <= totalSamples; i++) {
+                    const time = Math.min(i * interval, duration - 0.1);
+                    if (onProgress) {
+                        onProgress({ status: `フレーム抽出中: ${i + 1}/${totalSamples + 1}`, progress: i / totalSamples });
+                    }
+
+                    await seekTo(video, time);
+
+                    // シーク先が実際に変わったか確認
+                    const actualTime = video.currentTime;
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    const base64 = canvas.toDataURL('image/jpeg', 0.85).replace(/^data:image\/jpeg;base64,/, '');
+
+                    // 実際のシーク時刻を記録（要求と異なる場合がある）
+                    rawFrames.push({ time: actualTime, base64, pixelData: imageData.data });
+                }
+
+                URL.revokeObjectURL(url);
+                console.log(`[Video] 抽出完了: ${rawFrames.length}フレーム, 最終フレーム=${rawFrames.length > 0 ? rawFrames[rawFrames.length - 1].time.toFixed(1) : 0}秒`);
+
+                // シーンチェンジ検出
+                const sceneFrames = detectSceneChanges(rawFrames);
+                rawFrames.forEach(f => { f.pixelData = null; }); // メモリ解放
+
+                console.log(`[Video] シーンチェンジ検出: ${sceneFrames.length}シーン`);
+
+                const MAX_FRAMES = 30;
+                const finalFrames = sceneFrames.slice(0, MAX_FRAMES);
+
+                resolve(finalFrames.map((f, idx) => ({
+                    index: idx,
+                    time: f.time,
+                    base64: f.base64
+                })));
+            } catch (e) {
+                URL.revokeObjectURL(url);
+                reject(e);
+            }
+        };
+    });
+}
+
+// シーンチェンジ検出
+function detectSceneChanges(rawFrames) {
+    if (rawFrames.length <= 1) return rawFrames;
+
+    const THRESHOLD = 0.15;
+    const scenes = [];
+    let sceneStart = 0;
+
+    for (let i = 1; i < rawFrames.length; i++) {
+        const diff = calculateFrameDiff(rawFrames[i - 1].pixelData, rawFrames[i].pixelData);
+        if (diff >= THRESHOLD) {
+            scenes.push({ startIdx: sceneStart, endIdx: i - 1 });
+            sceneStart = i;
+        }
+    }
+    scenes.push({ startIdx: sceneStart, endIdx: rawFrames.length - 1 });
+
+    return scenes.map(scene => {
+        const midIdx = Math.floor((scene.startIdx + scene.endIdx) / 2);
+        return rawFrames[midIdx];
+    });
+}
+
+// ピクセル差分率（サンプリングベース高速版）
+function calculateFrameDiff(data1, data2) {
+    const STEP = 16, THRESH = 30;
+    let diff = 0, count = 0;
+    for (let i = 0; i < data1.length; i += 4 * STEP) {
+        count++;
+        if (Math.abs(data1[i] - data2[i]) > THRESH ||
+            Math.abs(data1[i+1] - data2[i+1]) > THRESH ||
+            Math.abs(data1[i+2] - data2[i+2]) > THRESH) diff++;
+    }
+    return count > 0 ? diff / count : 0;
 }

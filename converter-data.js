@@ -955,13 +955,119 @@ async function pdfToBase64Images(arrayBuffer, scale) {
     });
 }
 
+// ファイルをBase64文字列に変換（プレフィックスなし）
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const base64 = reader.result.split(',')[1];
+            resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+// Gemini APIをストリーミングで呼び出し、受信バイト数でプログレスを更新
+async function fetchGeminiStreaming(apiKey, requestBody, onProgress) {
+    const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=${apiKey}`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        }
+    );
+
+    if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        const msg = errorData?.error?.message || response.statusText;
+        throw new Error(`Gemini API エラー (${response.status}): ${msg}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let fullText = '';
+    let receivedBytes = 0;
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        receivedBytes += value.length;
+        const chunk = decoder.decode(value, { stream: true });
+
+        // SSEイベントからテキストを抽出
+        for (const line of chunk.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+                const data = JSON.parse(line.slice(6));
+                const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                fullText += text;
+            } catch (e) { /* 部分JSONは無視 */ }
+        }
+
+        if (onProgress) onProgress(receivedBytes, fullText.length, fullText);
+    }
+
+    console.log('[Gemini] ストリーミング応答:', fullText);
+    return fullText;
+}
+
+// ストリーミングで受信したテキストからJSONを解析
+function parseGeminiTextResponse(text) {
+    let jsonStr = text.trim();
+    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) jsonStr = jsonMatch[1].trim();
+
+    try {
+        return JSON.parse(jsonStr);
+    } catch (e) {
+        console.error('[Gemini] JSONパースエラー:', e, 'テキスト:', jsonStr);
+        throw new Error('Gemini APIの応答をパースできませんでした');
+    }
+}
+
+// Gemini APIレスポンスからJSONを解析する共通関数（非ストリーミング用）
+function parseGeminiJsonResponse(responseData) {
+    const text = responseData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    console.log('[Gemini] 応答:', text);
+
+    let jsonStr = text.trim();
+    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) jsonStr = jsonMatch[1].trim();
+
+    try {
+        return JSON.parse(jsonStr);
+    } catch (e) {
+        console.error('[Gemini] JSONパースエラー:', e, 'テキスト:', jsonStr);
+        throw new Error('Gemini APIの応答をパースできませんでした');
+    }
+}
+
+// Gemini OCR結果のentryを正規化する共通関数
+function normalizeGeminiEntry(entry) {
+    return {
+        date: entry.date || '',
+        counterparty: entry.counterparty || '',
+        amount: Number(entry.amount) || 0,
+        tax: Number(entry.tax) || 0,
+        taxRate: entry.taxRate || '',
+        description: entry.description || '',
+        items: Array.isArray(entry.items) ? entry.items.map(i => ({
+            name: i.name || '', amount: Number(i.amount) || 0, taxRate: i.taxRate || ''
+        })) : [],
+        isIncome: !!entry.isIncome
+    };
+}
+
 // --- Gemini OCR プロンプト定義 ---
 const GEMINI_DOC_TYPES = `対応する書類種別:
 - receipt（領収書・レシート）
 - invoice（請求書）
 - credit_card（クレジットカード明細）
-- bank_statement（通帳・入出金明細）
-- petty_cash（小口現金出納帳・現金出納帳）
+- bank_statement（銀行通帳・銀行の入出金明細。銀行名や口座番号が記載されている）
+- petty_cash（小口現金出納帳・現金出納帳。「小口現金」「現金出納帳」等の文字がある、または銀行名がなく現金の入出金を記録した帳簿）
 - expense_report（経費精算書）
 - sales_data（売上データ・売上一覧）
 - other（その他）`;
@@ -969,11 +1075,11 @@ const GEMINI_DOC_TYPES = `対応する書類種別:
 const GEMINI_ENTRY_FORMAT = `{
       "date": "YYYY/MM/DD",
       "counterparty": "取引先・店名",
-      "amount": 金額（数値）,
+      "amount": 金額（数値、税込合計）,
       "tax": 消費税額（数値、不明なら0）,
-      "taxRate": "10%" または "8%"（不明なら""）,
+      "taxRate": "10%" または "8%"（全品目同じ税率の場合。混在なら""）,
       "description": "摘要・内容の要約",
-      "items": [{"name": "品名", "amount": 金額数値}],
+      "items": [{"name": "品名", "amount": 金額数値, "taxRate": "10%"または"8%"}],
       "isIncome": false
     }`;
 
@@ -983,10 +1089,13 @@ const GEMINI_RULES = `ルール:
 - 領収書・請求書は通常1件のentry。クレカ明細・通帳・小口現金出納帳・経費精算書・売上データは複数entriesを返す
 - isIncomeは入金・売上の場合true、支払・経費の場合false
 - 通帳の場合: 入金行はisIncome=true、出金行はisIncome=false
-- 小口現金出納帳: 入金欄はisIncome=true、出金・支出欄はisIncome=false。「通帳」ではなく必ず「petty_cash」にする
+- 小口現金出納帳の判定: 書類に「小口現金」「現金出納帳」等の文字があるか、銀行名・口座番号がなく現金の収支を記録した帳簿はpetty_cash。入金欄はisIncome=true、出金・支出欄はisIncome=false。bank_statementにしないこと
+- bank_statementとpetty_cashの区別: 銀行名・支店名・口座番号が記載されていればbank_statement、それ以外はpetty_cash
 - クレカ明細の場合: すべてisIncome=false（支払）
 - 品名や明細が読み取れない場合はitemsを空配列にする
-- 読み取れない書類の場合はconfidenceを0.1以下にする`;
+- 読み取れない書類の場合はconfidenceを0.1以下にする
+- レシートに10%税率と8%軽減税率の品目が混在する場合、itemsに各品目のtaxRateを必ず記載すること
+- itemsのamountは税込金額で記載すること`;
 
 const GEMINI_OCR_PROMPT = `この画像は日本語の会計・経理関連の書類です。
 まず書類の種類を判定し、取引データをJSON形式で抽出してください。
@@ -1004,7 +1113,7 @@ ${GEMINI_DOC_TYPES}
 
 ${GEMINI_RULES}`;
 
-// Gemini APIで書類を解析（単一PDF用）
+// Gemini APIで書類を解析（単一PDF用・ストリーミング対応）
 async function ocrWithGemini(arrayBuffer, onProgress) {
     const apiKey = getGeminiApiKey();
     if (!apiKey) throw new Error('Gemini APIキーが設定されていません');
@@ -1013,71 +1122,80 @@ async function ocrWithGemini(arrayBuffer, onProgress) {
 
     const base64Images = await pdfToBase64Images(arrayBuffer);
 
-    if (onProgress) onProgress({ status: 'Gemini APIに送信中...', progress: 0.3 });
+    if (onProgress) onProgress({ status: 'Gemini APIに送信中...', progress: 0.2 });
 
     const imageParts = base64Images.map(b64 => ({
-        inline_data: {
-            mime_type: 'image/png',
-            data: b64
-        }
+        inline_data: { mime_type: 'image/png', data: b64 }
     }));
 
-    const prompt = GEMINI_OCR_PROMPT;
-
-    const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-        {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{
-                    parts: [...imageParts, { text: prompt }]
-                }]
-            })
+    const text = await fetchGeminiStreaming(apiKey, {
+        contents: [{ parts: [...imageParts, { text: GEMINI_OCR_PROMPT }] }]
+    }, (bytes, textLen, streamText) => {
+        if (onProgress) {
+            const p = Math.min(0.2 + (textLen / 800) * 0.6, 0.85);
+            onProgress({ status: `Gemini応答受信中... ${textLen}文字`, progress: p, streamText });
         }
-    );
+    });
 
-    if (onProgress) onProgress({ status: '応答を解析中...', progress: 0.8 });
+    if (onProgress) onProgress({ status: '応答を解析中...', progress: 0.9 });
 
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const msg = errorData?.error?.message || response.statusText;
-        throw new Error(`Gemini API エラー (${response.status}): ${msg}`);
-    }
+    const result = parseGeminiTextResponse(text);
+    result.confidence = Number(result.confidence) || 0.5;
+    result.documentType = result.documentType || 'other';
+    if (!Array.isArray(result.entries)) result.entries = [];
+    result.entries = result.entries.map(normalizeGeminiEntry);
+    result._sourceImages = base64Images.map(b64 => `data:image/png;base64,${b64}`);
+    return result;
+}
 
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    console.log('[Gemini] 応答:', text);
+// Gemini APIで画像（写真）を解析（複数レシート対応・ストリーミング）
+async function ocrImageWithGemini(base64Data, mimeType, onProgress) {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) throw new Error('Gemini APIキーが設定されていません');
 
-    let jsonStr = text.trim();
-    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) {
-        jsonStr = jsonMatch[1].trim();
-    }
+    if (onProgress) onProgress({ status: 'Gemini APIに送信中...', progress: 0.2 });
 
-    try {
-        const result = JSON.parse(jsonStr);
-        result.confidence = Number(result.confidence) || 0.5;
-        result.documentType = result.documentType || 'other';
-        // entriesを正規化
-        if (!Array.isArray(result.entries)) result.entries = [];
-        result.entries = result.entries.map(entry => ({
-            date: entry.date || '',
-            counterparty: entry.counterparty || '',
-            amount: Number(entry.amount) || 0,
-            tax: Number(entry.tax) || 0,
-            taxRate: entry.taxRate || '',
-            description: entry.description || '',
-            items: Array.isArray(entry.items) ? entry.items.map(i => ({
-                name: i.name || '', amount: Number(i.amount) || 0
-            })) : [],
-            isIncome: !!entry.isIncome
-        }));
-        return result;
-    } catch (e) {
-        console.error('[Gemini] JSONパースエラー:', e, 'テキスト:', jsonStr);
-        throw new Error('Gemini APIの応答をパースできませんでした');
-    }
+    const prompt = `この画像は日本語の会計・経理関連の書類（レシート、領収書等）の写真です。
+1枚の画像に複数のレシートや領収書が写っている場合があります。
+写っている全てのレシート・領収書を個別に識別し、それぞれの取引データを抽出してください。
+
+${GEMINI_DOC_TYPES}
+
+必ず以下のJSON形式のみを返してください（説明文や\`\`\`は不要）:
+{
+  "documentType": "書類種別",
+  "confidence": 0.0〜1.0の読み取り確信度,
+  "entries": [
+    ${GEMINI_ENTRY_FORMAT}
+  ]
+}
+
+${GEMINI_RULES}
+- 1枚の写真に複数のレシートが写っている場合、各レシートを個別のentryとして返すこと
+- 台紙に貼られたレシートやホッチキスで束になったレシートも個別に識別すること`;
+
+    const text = await fetchGeminiStreaming(apiKey, {
+        contents: [{
+            parts: [
+                { inline_data: { mime_type: mimeType, data: base64Data } },
+                { text: prompt }
+            ]
+        }]
+    }, (bytes, textLen, streamText) => {
+        if (onProgress) {
+            const p = Math.min(0.2 + (textLen / 600) * 0.6, 0.85);
+            onProgress({ status: `Gemini応答受信中... ${textLen}文字`, progress: p, streamText });
+        }
+    });
+
+    if (onProgress) onProgress({ status: '応答を解析中...', progress: 0.9 });
+
+    const result = parseGeminiTextResponse(text);
+    result.confidence = Number(result.confidence) || 0.5;
+    result.documentType = result.documentType || 'receipt';
+    if (!Array.isArray(result.entries)) result.entries = [];
+    result.entries = result.entries.map(normalizeGeminiEntry);
+    return result;
 }
 
 // Gemini APIで複数PDFを一括解析（バッチ処理）
@@ -1122,98 +1240,326 @@ ${GEMINI_RULES}
 
     parts.push({ text: prompt });
 
-    const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    const text = await fetchGeminiStreaming(apiKey, {
+        contents: [{ parts }]
+    }, (bytes, textLen, streamText) => {
+        if (onProgress) {
+            const p = Math.min(0.3 + (textLen / 1200) * 0.5, 0.85);
+            onProgress({ status: `Gemini応答受信中... ${textLen}文字`, progress: p, streamText });
+        }
+    });
+
+    if (onProgress) onProgress({ status: '応答を解析中...', progress: 0.9 });
+
+    const results = parseGeminiTextResponse(text);
+    if (!Array.isArray(results)) throw new Error('Gemini APIの応答が配列ではありません');
+
+    return results.map(r => ({
+        fileIndex: Number(r.fileIndex) || 0,
+        documentType: r.documentType || 'other',
+        confidence: Number(r.confidence) || 0.5,
+        entries: (Array.isArray(r.entries) ? r.entries : []).map(normalizeGeminiEntry)
+    }));
+}
+
+// 動画ファイルを直接Geminiに送信してOCR（フレーム抽出より高精度）
+async function ocrVideoWithGemini(file, onProgress) {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) throw new Error('Gemini APIキーが設定されていません');
+
+    const MAX_INLINE_SIZE = 15 * 1024 * 1024; // 15MB（base64化で約33%増加するため）
+
+    if (file.size <= MAX_INLINE_SIZE) {
+        return await ocrVideoInlineWithGemini(file, apiKey, onProgress);
+    } else {
+        return await ocrVideoWithFileApi(file, apiKey, onProgress);
+    }
+}
+
+// 小さい動画: inline_dataで直接送信
+async function ocrVideoInlineWithGemini(file, apiKey, onProgress) {
+    if (onProgress) onProgress({ status: '動画を準備中...', progress: 0.1 });
+
+    const base64 = await fileToBase64(file);
+    const mimeType = file.type || 'video/mp4';
+
+    if (onProgress) onProgress({ status: 'Gemini APIで動画を解析中...', progress: 0.3 });
+
+    const prompt = buildVideoOcrPrompt();
+    const text = await fetchGeminiStreaming(apiKey, {
+        contents: [{
+            parts: [
+                { inline_data: { mime_type: mimeType, data: base64 } },
+                { text: prompt }
+            ]
+        }]
+    }, (bytes, textLen, streamText) => {
+        if (onProgress) {
+            const p = Math.min(0.3 + (textLen / 1000) * 0.5, 0.85);
+            onProgress({ status: `Gemini応答受信中... ${textLen}文字`, progress: p, streamText });
+        }
+    });
+
+    if (onProgress) onProgress({ status: '応答を解析中...', progress: 0.9 });
+
+    return parseVideoOcrTextResponse(text);
+}
+
+// 大きい動画: File APIでアップロードしてから解析
+async function ocrVideoWithFileApi(file, apiKey, onProgress) {
+    if (onProgress) onProgress({ status: '動画をアップロード中...', progress: 0.1 });
+
+    const mimeType = file.type || 'video/mp4';
+
+    // 1. アップロードセッション開始
+    const startResponse = await fetch(
+        `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`,
         {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'X-Goog-Upload-Protocol': 'resumable',
+                'X-Goog-Upload-Command': 'start',
+                'X-Goog-Upload-Header-Content-Length': String(file.size),
+                'X-Goog-Upload-Header-Content-Type': mimeType,
+                'Content-Type': 'application/json'
+            },
             body: JSON.stringify({
-                contents: [{ parts }]
+                file: { displayName: file.name }
             })
         }
     );
 
-    if (onProgress) onProgress({ status: '応答を解析中...', progress: 0.8 });
-
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const msg = errorData?.error?.message || response.statusText;
-        throw new Error(`Gemini API エラー (${response.status}): ${msg}`);
+    if (!startResponse.ok) {
+        throw new Error(`ファイルアップロード開始エラー (${startResponse.status})`);
     }
 
-    const data = await response.json();
-    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-    console.log('[Gemini Batch] 応答:', text);
+    const uploadUrl = startResponse.headers.get('X-Goog-Upload-URL');
+    if (!uploadUrl) throw new Error('アップロードURLが取得できませんでした');
 
-    let jsonStr = text.trim();
-    const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonMatch) jsonStr = jsonMatch[1].trim();
+    // 2. ファイルデータをアップロード
+    if (onProgress) onProgress({ status: '動画をアップロード中...', progress: 0.3 });
 
-    try {
-        const results = JSON.parse(jsonStr);
-        if (!Array.isArray(results)) throw new Error('配列でない');
+    const uploadResponse = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+            'X-Goog-Upload-Offset': '0',
+            'X-Goog-Upload-Command': 'upload, finalize',
+            'Content-Length': String(file.size)
+        },
+        body: file
+    });
 
-        // 各結果を正規化
-        return results.map(r => ({
-            fileIndex: Number(r.fileIndex) || 0,
-            documentType: r.documentType || 'other',
-            confidence: Number(r.confidence) || 0.5,
-            entries: (Array.isArray(r.entries) ? r.entries : []).map(entry => ({
-                date: entry.date || '',
-                counterparty: entry.counterparty || '',
-                amount: Number(entry.amount) || 0,
-                tax: Number(entry.tax) || 0,
-                taxRate: entry.taxRate || '',
-                description: entry.description || '',
-                items: Array.isArray(entry.items) ? entry.items.map(i => ({
-                    name: i.name || '', amount: Number(i.amount) || 0
-                })) : [],
-                isIncome: !!entry.isIncome
-            }))
-        }));
-    } catch (e) {
-        console.error('[Gemini Batch] JSONパースエラー:', e, 'テキスト:', jsonStr);
-        throw new Error('Gemini APIの応答をパースできませんでした');
+    if (!uploadResponse.ok) {
+        throw new Error(`ファイルアップロードエラー (${uploadResponse.status})`);
     }
-}
 
-// Gemini APIで勘定科目を推測（既存ルールで埋まらなかった行のフォールバック）
-async function estimateAccountsWithGemini(rows, industry) {
-    const apiKey = getGeminiApiKey();
-    if (!apiKey) return;
+    const uploadResult = await uploadResponse.json();
+    const fileName = uploadResult.file?.name;
+    const fileUri = uploadResult.file?.uri;
 
-    // 勘定科目が未入力の行を抽出
-    const targets = [];
-    rows.forEach((row, idx) => {
-        if (!row.kariKamoku && row.tekiyou) {
-            targets.push({ idx, tekiyou: row.tekiyou, torihikisaki: row.torihikisaki || '' });
+    if (!fileName || !fileUri) throw new Error('アップロード結果からファイル情報を取得できませんでした');
+
+    // 3. ファイルがACTIVEになるまで待機
+    if (onProgress) onProgress({ status: '動画の処理を待機中...', progress: 0.45 });
+
+    await waitForGeminiFileActive(fileName, apiKey, onProgress);
+
+    // 4. ストリーミングで解析
+    if (onProgress) onProgress({ status: 'Gemini APIで動画を解析中...', progress: 0.6 });
+
+    const prompt = buildVideoOcrPrompt();
+    const text = await fetchGeminiStreaming(apiKey, {
+        contents: [{
+            parts: [
+                { file_data: { file_uri: fileUri, mime_type: mimeType } },
+                { text: prompt }
+            ]
+        }]
+    }, (bytes, textLen, streamText) => {
+        if (onProgress) {
+            const p = Math.min(0.6 + (textLen / 1000) * 0.25, 0.88);
+            onProgress({ status: `Gemini応答受信中... ${textLen}文字`, progress: p, streamText });
         }
     });
 
-    if (targets.length === 0) return;
+    if (onProgress) onProgress({ status: '応答を解析中...', progress: 0.9 });
+
+    // 5. アップロードしたファイルを削除（クリーンアップ）
+    try {
+        await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`,
+            { method: 'DELETE' }
+        );
+    } catch (e) {
+        console.warn('[Gemini] ファイル削除失敗（無視）:', e);
+    }
+
+    return parseVideoOcrTextResponse(text);
+}
+
+// Gemini File APIでファイルがACTIVEになるまでポーリング
+async function waitForGeminiFileActive(fileName, apiKey, onProgress) {
+    const MAX_WAIT = 120000; // 最大2分
+    const POLL_INTERVAL = 3000; // 3秒間隔
+    const start = Date.now();
+
+    while (Date.now() - start < MAX_WAIT) {
+        const res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
+        );
+        if (!res.ok) throw new Error(`ファイル状態確認エラー (${res.status})`);
+
+        const fileInfo = await res.json();
+
+        if (fileInfo.state === 'ACTIVE') return;
+        if (fileInfo.state === 'FAILED') throw new Error('動画ファイルの処理に失敗しました');
+
+        if (onProgress) {
+            const elapsed = Math.min((Date.now() - start) / MAX_WAIT, 0.95);
+            onProgress({ status: '動画の処理を待機中...', progress: 0.45 + elapsed * 0.1 });
+        }
+
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+    }
+
+    throw new Error('動画ファイルの処理がタイムアウトしました');
+}
+
+// 動画OCR用のプロンプトを構築
+function buildVideoOcrPrompt() {
+    return `この動画にはレシート・領収書・請求書などの会計書類が映っています。
+動画をめくりながら撮影しているため、複数の書類が順番に映ります。
+
+全ての書類を個別に識別し、それぞれの取引データをJSON形式で抽出してください。
+同じ書類が複数回映っている場合は、最も鮮明なフレームから1回だけ抽出してください（重複排除）。
+
+${GEMINI_DOC_TYPES}
+
+必ず以下のJSON配列形式のみを返してください（説明文や\`\`\`は不要）:
+[
+  {
+    "timestamp": 動画内でこの書類が最も鮮明に映っているフレームの秒数（数値）,
+    "documentType": "書類種別",
+    "confidence": 0.0〜1.0の読み取り確信度,
+    "entries": [
+      ${GEMINI_ENTRY_FORMAT}
+    ]
+  }
+]
+
+${GEMINI_RULES}
+- 動画内で映る全ての書類を個別のオブジェクトとして返すこと
+- timestampは動画の先頭からの秒数（例: 3.5）で、その書類が最も読みやすい瞬間を指定すること
+- ぼやけて読めない書類はconfidenceを0.1以下にして含めること
+- 書類が映っていないフレームは無視すること`;
+}
+
+// 動画OCR結果の正規化（共通処理）
+function normalizeVideoOcrResults(results) {
+    if (Array.isArray(results)) {
+        return results.map(r => ({
+            timestamp: Number(r.timestamp) || 0,
+            documentType: r.documentType || 'receipt',
+            confidence: Number(r.confidence) || 0.5,
+            entries: (Array.isArray(r.entries) ? r.entries : []).map(normalizeGeminiEntry)
+        }));
+    }
+
+    if (results && typeof results === 'object') {
+        return [{
+            timestamp: Number(results.timestamp) || 0,
+            documentType: results.documentType || 'receipt',
+            confidence: Number(results.confidence) || 0.5,
+            entries: (Array.isArray(results.entries) ? results.entries : []).map(normalizeGeminiEntry)
+        }];
+    }
+
+    throw new Error('Gemini APIの応答を解析できませんでした');
+}
+
+// 動画OCR結果のパース（非ストリーミング用）
+function parseVideoOcrResponse(data) {
+    return normalizeVideoOcrResults(parseGeminiJsonResponse(data));
+}
+
+// 動画OCR結果のパース（ストリーミングテキスト版）
+function parseVideoOcrTextResponse(text) {
+    return normalizeVideoOcrResults(parseGeminiTextResponse(text));
+}
+
+// Gemini APIで勘定科目・税区分を推測（空フィールドを補完）
+async function estimateAccountsWithGemini(rows, industry) {
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) return 0;
+
+    // 補完が必要な行を抽出（借方科目・貸方科目・税区分のいずれかが空）
+    const targets = [];
+    rows.forEach((row, idx) => {
+        if (!row.tekiyou && !row.torihikisaki) return;
+        const missing = [];
+        if (!row.kariKamoku) missing.push('借方勘定科目');
+        if (!row.kashiKamoku) missing.push('貸方勘定科目');
+        if (!row.kariZeiku) missing.push('借方税区分');
+        if (missing.length === 0) return;
+        targets.push({
+            idx,
+            tekiyou: row.tekiyou || '',
+            torihikisaki: row.torihikisaki || '',
+            kariKamoku: row.kariKamoku || '',
+            kashiKamoku: row.kashiKamoku || '',
+            kariKingaku: row.kariKingaku || '',
+            kashiKingaku: row.kashiKingaku || '',
+            missing
+        });
+    });
+
+    if (targets.length === 0) return 0;
 
     // 使用可能な勘定科目リストを構築
     const accountSet = new Set();
     ACCOUNT_DEFAULTS.forEach(entry => accountSet.add(entry[2]));
+    COMMON_ACCOUNTS.forEach(a => accountSet.add(a));
     const accountList = [...accountSet].sort();
 
+    // 税区分リスト
+    const taxList = TAX_CATEGORIES.join('、');
+
     const prompt = `あなたは日本の記帳代行の専門家です。
-以下の取引の摘要から、最も適切な借方勘定科目を選んでください。
+以下の取引について、空欄のフィールドを推測してください。
 
 使用可能な勘定科目（この中から選ぶこと）:
 ${accountList.join('、')}
 
+使用可能な税区分:
+${taxList}
+
 ${industry ? `業種: ${industry}` : ''}
 
 取引一覧:
-${targets.map((t, i) => `${i + 1}. 摘要「${t.tekiyou}」${t.torihikisaki ? ` 取引先「${t.torihikisaki}」` : ''}`).join('\n')}
+${targets.map((t, i) => {
+    let info = `${i + 1}. 摘要「${t.tekiyou}」`;
+    if (t.torihikisaki) info += ` 取引先「${t.torihikisaki}」`;
+    if (t.kariKamoku) info += ` 借方科目「${t.kariKamoku}」`;
+    if (t.kashiKamoku) info += ` 貸方科目「${t.kashiKamoku}」`;
+    info += ` → 空欄: ${t.missing.join('・')}`;
+    return info;
+}).join('\n')}
 
 必ず以下のJSON配列のみを返してください（説明文や\`\`\`は不要）:
 [
-  {"index": 1, "account": "勘定科目名", "confidence": 0.0〜1.0}
+  {
+    "index": 1,
+    "kariKamoku": "借方勘定科目（空欄の場合のみ推測、それ以外は空文字）",
+    "kashiKamoku": "貸方勘定科目（空欄の場合のみ推測、それ以外は空文字）",
+    "kariZeiku": "借方税区分（空欄の場合のみ推測、それ以外は空文字）",
+    "confidence": 0.0〜1.0
+  }
 ]
 
-不明な場合はconfidenceを0.3以下にしてください。`;
+ルール:
+- 空欄でないフィールドは空文字を返す（上書きしない）
+- 不明な場合はconfidenceを0.3以下にする
+- 税区分は取引内容と勘定科目から推測する（経費の仕入は通常「課税仕入10%」、軽減税率対象は「課税仕入8%（軽減）」等）`;
 
     try {
         const response = await fetch(
@@ -1227,7 +1573,7 @@ ${targets.map((t, i) => `${i + 1}. 摘要「${t.tekiyou}」${t.torihikisaki ? ` 
             }
         );
 
-        if (!response.ok) return;
+        if (!response.ok) return 0;
 
         const data = await response.json();
         const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
@@ -1238,7 +1584,7 @@ ${targets.map((t, i) => `${i + 1}. 摘要「${t.tekiyou}」${t.torihikisaki ? ` 
         if (jsonMatch) jsonStr = jsonMatch[1].trim();
 
         const suggestions = JSON.parse(jsonStr);
-        if (!Array.isArray(suggestions)) return;
+        if (!Array.isArray(suggestions)) return 0;
 
         // 推測結果を適用（confidence 0.3以上のみ）
         let appliedCount = 0;
@@ -1246,13 +1592,32 @@ ${targets.map((t, i) => `${i + 1}. 摘要「${t.tekiyou}」${t.torihikisaki ? ` 
             const idx = Number(s.index) - 1;
             if (idx < 0 || idx >= targets.length) return;
             if (Number(s.confidence) < 0.3) return;
-            if (!accountList.includes(s.account)) return;
 
             const rowIdx = targets[idx].idx;
-            rows[rowIdx].kariKamoku = s.account;
-            rows[rowIdx]._geminiAccount = true;
-            rows[rowIdx]._geminiConfidence = Number(s.confidence);
-            appliedCount++;
+            const row = rows[rowIdx];
+            let applied = false;
+
+            // 借方勘定科目
+            if (!row.kariKamoku && s.kariKamoku && accountList.includes(s.kariKamoku)) {
+                row.kariKamoku = s.kariKamoku;
+                applied = true;
+            }
+            // 貸方勘定科目
+            if (!row.kashiKamoku && s.kashiKamoku && accountList.includes(s.kashiKamoku)) {
+                row.kashiKamoku = s.kashiKamoku;
+                applied = true;
+            }
+            // 借方税区分
+            if (!row.kariZeiku && s.kariZeiku && TAX_CATEGORIES.includes(s.kariZeiku)) {
+                row.kariZeiku = s.kariZeiku;
+                applied = true;
+            }
+
+            if (applied) {
+                row._geminiAccount = true;
+                row._geminiConfidence = Number(s.confidence);
+                appliedCount++;
+            }
         });
 
         console.log(`[Gemini] 科目推測: ${appliedCount}/${targets.length} 件適用`);
